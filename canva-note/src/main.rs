@@ -19,9 +19,9 @@ use commands::{
 };
 use derive_more::{From, TryInto};
 use eframe::egui::{
-    self, Area, Color32, ColorImage, CornerRadius, FontData, FontDefinitions, FontFamily, Id,
-    Image, ImageSource, Key, PointerButton, Pos2, Sense, Stroke, StrokeKind, TextureHandle,
-    TextureOptions, Visuals, load::SizedTexture,
+    self, Area, Color32, ColorImage, CornerRadius, FontData, FontDefinitions, FontFamily, Frame,
+    Id, Image, ImageSource, Key, Margin, PointerButton, Pos2, Sense, Stroke, StrokeKind,
+    TextureHandle, TextureOptions, Visuals, load::SizedTexture,
 };
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use log::error;
@@ -567,9 +567,11 @@ impl eframe::App for MyEguiApp {
                             ui.style_mut().interaction.selectable_labels = false;
                         }
                         area.show(ui.ctx(), |ui| {
-                            CommonMarkViewer::new()
-                                .default_width(Some(text.width))
-                                .show(ui, &mut md_node.cache, &text.content);
+                            Frame::NONE.inner_margin(Margin::same(4)).show(ui, |ui| {
+                                CommonMarkViewer::new()
+                                    .default_width(Some(text.width))
+                                    .show(ui, &mut md_node.cache, &text.content);
+                            });
                         })
                     }
                     NodeKind::Image(image_node) => {
@@ -583,12 +585,14 @@ impl eframe::App for MyEguiApp {
                             ui.style_mut().interaction.selectable_labels = false;
                         }
                         area.show(ui.ctx(), |ui| {
-                            ui.add(
-                                Image::new(ImageSource::Texture(SizedTexture::from_handle(
-                                    &image_node.texture,
-                                )))
-                                .fit_to_original_size(1.0),
-                            );
+                            Frame::NONE.inner_margin(Margin::same(4)).show(ui, |ui| {
+                                ui.add(
+                                    Image::new(ImageSource::Texture(SizedTexture::from_handle(
+                                        &image_node.texture,
+                                    )))
+                                    .fit_to_original_size(1.0),
+                                );
+                            });
                         })
                     }
                 };
