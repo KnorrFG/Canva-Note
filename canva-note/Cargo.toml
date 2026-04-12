@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arboard = "3.6.1"
+clap = { version = "4.6.0", features = ["derive"] }
 eframe = "0.34.1"
 egui_commonmark = { version = "0.23.0", features = ["better_syntax_highlighting"] }
 egui_extras = { version = "0.34.1", features = ["all_loaders"] }
