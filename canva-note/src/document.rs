@@ -61,6 +61,7 @@ pub(crate) struct TextData {
 pub(crate) struct ImageData {
     pub(crate) data: Arc<egui::ColorImage>,
     pub(crate) pos: Pos2,
+    pub(crate) size: egui::Vec2,
 }
 
 pub(crate) struct Document {

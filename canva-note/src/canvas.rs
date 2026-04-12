@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use eframe::egui::{
-    self, Area, Color32, CornerRadius, Frame, Image, ImageSource, Margin, PointerButton, Rect,
-    Sense, Stroke, StrokeKind, load::SizedTexture,
+    self, Area, Frame, Image, ImageSource, Margin, PointerButton, Rect, Sense, load::SizedTexture,
 };
+use egui::Window;
 use egui_commonmark::CommonMarkViewer;
 
 use crate::{
@@ -11,6 +11,55 @@ use crate::{
     commands::MoveNodeCommand,
     editor,
 };
+
+#[derive(Clone, Copy)]
+enum SelectedNodeSizing {
+    Width(f32),
+    Size(egui::Vec2),
+}
+
+impl SelectedNodeSizing {
+    fn resize_state_salt(self, egui_id: egui::Id) -> impl std::hash::Hash {
+        match self {
+            Self::Width(width) => ("selected_width", egui_id.value(), width.round() as i32, 0),
+            Self::Size(size) => (
+                "selected_size",
+                egui_id.value(),
+                size.x.round() as i32,
+                size.y.round() as i32,
+            ),
+        }
+    }
+}
+
+struct NodeContainerResponse {
+    response: egui::Response,
+    content_rect: Rect,
+}
+
+fn fit_size_with_aspect(source_size: egui::Vec2, available_size: egui::Vec2) -> egui::Vec2 {
+    let scale = (available_size.x / source_size.x)
+        .min(available_size.y / source_size.y)
+        .max(0.0);
+    source_size * scale
+}
+
+fn show_zoomed_markdown(
+    ui: &mut egui::Ui,
+    zoom: f32,
+    cache: &mut egui_commonmark::CommonMarkCache,
+    content: &str,
+    width: Option<usize>,
+) {
+    for font_id in ui.style_mut().text_styles.values_mut() {
+        font_id.size *= zoom;
+    }
+    let mut viewer = CommonMarkViewer::new();
+    if let Some(width) = width {
+        viewer = viewer.default_width(Some(width));
+    }
+    viewer.show(ui, cache, content);
+}
 
 fn hit_test_node(rects: &[(u64, Rect)], point: egui::Pos2) -> Option<u64> {
     rects
@@ -60,6 +109,167 @@ fn dragged_node(active_drag: &Option<DragState>, global_drag_active: bool) -> Op
     } else {
         active_drag.as_ref().map(|drag| drag.node_id)
     }
+}
+
+fn show_node_container(
+    ctx: &egui::Context,
+    egui_id: egui::Id,
+    screen_pos: egui::Pos2,
+    sizing: SelectedNodeSizing,
+    add_contents: impl FnOnce(&mut egui::Ui) -> Rect,
+) -> NodeContainerResponse {
+    let mut window = Window::new("")
+        .id(egui_id)
+        .title_bar(false)
+        .collapsible(false)
+        .resize(|r| {
+            let (resizable, with_stroke) = match sizing {
+                SelectedNodeSizing::Width(_) => ([true, false], false),
+                SelectedNodeSizing::Size(_) => ([true, true], true),
+            };
+            r.with_stroke(with_stroke)
+                .resizable(resizable)
+                .min_size(egui::Vec2::ZERO)
+                .id_salt(sizing.resize_state_salt(egui_id))
+        })
+        .movable(false)
+        .current_pos(screen_pos)
+        .constrain(false);
+    window = match sizing {
+        SelectedNodeSizing::Width(width) => window
+            .default_width(width)
+            .default_height(0.0)
+            .min_height(0.0),
+        SelectedNodeSizing::Size(size) => window.default_size(size),
+    };
+    let inner = window.show(ctx, add_contents).unwrap();
+    NodeContainerResponse {
+        response: inner.response,
+        content_rect: inner
+            .inner
+            .expect("selected node window should have content"),
+    }
+}
+
+fn show_unselected_node_container(
+    ctx: &egui::Context,
+    egui_id: egui::Id,
+    screen_pos: egui::Pos2,
+    add_contents: impl FnOnce(&mut egui::Ui) -> Rect,
+) -> NodeContainerResponse {
+    let inner = Area::new(egui_id)
+        .fixed_pos(screen_pos)
+        .sense(Sense::click_and_drag())
+        .constrain(false)
+        .show(ctx, add_contents);
+    NodeContainerResponse {
+        response: inner.response,
+        content_rect: inner.inner,
+    }
+}
+
+fn show_selected_markdown(
+    ctx: &egui::Context,
+    egui_id: egui::Id,
+    screen_pos: egui::Pos2,
+    zoom: f32,
+    text: &crate::document::TextData,
+    cache: &mut egui_commonmark::CommonMarkCache,
+) -> NodeContainerResponse {
+    show_node_container(
+        ctx,
+        egui_id,
+        screen_pos,
+        SelectedNodeSizing::Width(text.width as f32 * zoom),
+        |ui| {
+            Frame::NONE
+                .inner_margin(Margin::same(4))
+                .show(ui, |ui| {
+                    show_zoomed_markdown(ui, zoom, cache, &text.content, None);
+                })
+                .response
+                .rect
+        },
+    )
+}
+
+fn show_unselected_markdown(
+    ctx: &egui::Context,
+    egui_id: egui::Id,
+    screen_pos: egui::Pos2,
+    zoom: f32,
+    text: &crate::document::TextData,
+    cache: &mut egui_commonmark::CommonMarkCache,
+) -> NodeContainerResponse {
+    show_unselected_node_container(ctx, egui_id, screen_pos, |ui| {
+        Frame::NONE
+            .inner_margin(Margin::same(4))
+            .show(ui, |ui| {
+                ui.set_width(text.width as f32 * zoom);
+                show_zoomed_markdown(
+                    ui,
+                    zoom,
+                    cache,
+                    &text.content,
+                    Some((text.width as f32 * zoom).round() as usize),
+                );
+            })
+            .response
+            .rect
+    })
+}
+
+fn show_selected_image(
+    ctx: &egui::Context,
+    egui_id: egui::Id,
+    screen_pos: egui::Pos2,
+    zoom: f32,
+    image_size: egui::Vec2,
+    source_size: egui::Vec2,
+    texture: &eframe::egui::TextureHandle,
+) -> NodeContainerResponse {
+    show_node_container(
+        ctx,
+        egui_id,
+        screen_pos,
+        SelectedNodeSizing::Size(image_size * zoom),
+        |ui| {
+            Frame::NONE
+                .inner_margin(Margin::same(4))
+                .show(ui, |ui| {
+                    let display_size =
+                        fit_size_with_aspect(source_size * zoom, ui.available_size());
+                    ui.add(
+                        Image::new(ImageSource::Texture(SizedTexture::from_handle(texture)))
+                            .fit_to_exact_size(display_size),
+                    )
+                    .rect
+                })
+                .inner
+        },
+    )
+}
+
+fn show_unselected_image(
+    ctx: &egui::Context,
+    egui_id: egui::Id,
+    screen_pos: egui::Pos2,
+    zoom: f32,
+    image_size: egui::Vec2,
+    texture: &eframe::egui::TextureHandle,
+) -> NodeContainerResponse {
+    show_unselected_node_container(ctx, egui_id, screen_pos, |ui| {
+        Frame::NONE
+            .inner_margin(Margin::same(4))
+            .show(ui, |ui| {
+                ui.add(
+                    Image::new(ImageSource::Texture(SizedTexture::from_handle(texture)))
+                        .fit_to_exact_size(image_size * zoom),
+                )
+                .rect
+            })
+            .inner
+    })
 }
 
 impl App {
@@ -117,61 +327,104 @@ impl App {
                 let screen_pos = self.world_to_screen_pos(node_pos);
                 let egui_id = self.nodes[&node_id].egui_id;
                 let zoom = self.zoom;
+                let selected = self.selected == Some(node_id);
 
-                let resp = match &mut self.nodes.get_mut(&node_id).unwrap().kind {
-                    NodeKind::Markdown(md_node) => {
-                        let text = self.document.node(node_id).unwrap().as_text().unwrap();
-                        let area = Area::new(egui_id)
-                            .fixed_pos(screen_pos)
-                            .sense(Sense::click_and_drag())
-                            .constrain(false);
+                let resp = if selected {
+                    match &mut self.nodes.get_mut(&node_id).unwrap().kind {
+                        NodeKind::Markdown(md_node) => {
+                            let text = self.document.node(node_id).unwrap().as_text().unwrap();
+                            if secondary_down {
+                                ui.style_mut().interaction.selectable_labels = false;
+                            }
+                            let response = show_selected_markdown(
+                                ui.ctx(),
+                                egui_id,
+                                screen_pos,
+                                zoom,
+                                text,
+                                &mut md_node.cache,
+                            );
 
-                        if secondary_down {
-                            ui.style_mut().interaction.selectable_labels = false;
+                            // the window has extra space, we need to update the stored
+                            // coordinates to include the window values to prevent the window
+                            // from jumping
+                            let new_pos = self.screen_to_world_pos(response.response.rect.min);
+                            let new_width = (response.content_rect.width() / zoom).round() as usize;
+                            if let crate::document::NodeData::Text(text) =
+                                self.document.node_mut(node_id).unwrap()
+                            {
+                                text.pos = new_pos;
+                                text.width = new_width;
+                            }
+                            response
                         }
-                        area.show(ui.ctx(), |ui| {
-                            Frame::NONE.inner_margin(Margin::same(4)).show(ui, |ui| {
-                                let mut style = (**ui.style()).clone();
-                                for font_id in style.text_styles.values_mut() {
-                                    font_id.size *= zoom;
-                                }
-                                ui.set_style(style);
-                                CommonMarkViewer::new()
-                                    .default_width(Some((text.width as f32 * zoom) as usize))
-                                    .show(ui, &mut md_node.cache, &text.content);
-                            });
-                        })
+                        NodeKind::Image(image_node) => {
+                            let (image_size, source_size) =
+                                match self.document.node(node_id).unwrap() {
+                                    crate::document::NodeData::Image(image) => (
+                                        image.size,
+                                        egui::vec2(
+                                            image.data.size[0] as f32,
+                                            image.data.size[1] as f32,
+                                        ),
+                                    ),
+                                    _ => unreachable!(),
+                                };
+                            let response = show_selected_image(
+                                ui.ctx(),
+                                egui_id,
+                                screen_pos,
+                                zoom,
+                                image_size,
+                                source_size,
+                                &image_node.texture,
+                            );
+                            let new_pos = self.screen_to_world_pos(response.response.rect.min);
+                            let new_size = response.content_rect.size() / zoom;
+                            if let crate::document::NodeData::Image(image) =
+                                self.document.node_mut(node_id).unwrap()
+                            {
+                                image.pos = new_pos;
+                                image.size = new_size;
+                            }
+                            response
+                        }
                     }
-                    NodeKind::Image(image_node) => {
-                        let area = Area::new(egui_id)
-                            .fixed_pos(screen_pos)
-                            .sense(Sense::click_and_drag())
-                            .constrain(false);
-
-                        area.show(ui.ctx(), |ui| {
-                            Frame::NONE.inner_margin(Margin::same(4)).show(ui, |ui| {
-                                ui.add(
-                                    Image::new(ImageSource::Texture(SizedTexture::from_handle(
-                                        &image_node.texture,
-                                    )))
-                                    .fit_to_original_size(zoom),
-                                );
-                            });
-                        })
+                } else {
+                    match &mut self.nodes.get_mut(&node_id).unwrap().kind {
+                        NodeKind::Markdown(md_node) => {
+                            let text = self.document.node(node_id).unwrap().as_text().unwrap();
+                            if secondary_down {
+                                ui.style_mut().interaction.selectable_labels = false;
+                            }
+                            show_unselected_markdown(
+                                ui.ctx(),
+                                egui_id,
+                                screen_pos,
+                                zoom,
+                                text,
+                                &mut md_node.cache,
+                            )
+                        }
+                        NodeKind::Image(image_node) => {
+                            let image_size = match self.document.node(node_id).unwrap() {
+                                crate::document::NodeData::Image(image) => image.size,
+                                _ => unreachable!(),
+                            };
+                            show_unselected_image(
+                                ui.ctx(),
+                                egui_id,
+                                screen_pos,
+                                zoom,
+                                image_size,
+                                &image_node.texture,
+                            )
+                        }
                     }
                 };
 
                 if resp.response.clicked_by(PointerButton::Primary) {
                     self.selected = Some(node_id);
-                }
-
-                if self.selected == Some(node_id) {
-                    ui.painter().rect_stroke(
-                        resp.response.rect.expand(10.0),
-                        CornerRadius::same(4),
-                        Stroke::new(1.5, Color32::BLACK),
-                        StrokeKind::Outside,
-                    );
                 }
 
                 node_rects.push((node_id, resp.response.rect));

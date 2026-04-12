@@ -256,6 +256,7 @@ impl App {
             data: ImageData {
                 data: Arc::new(image.clone()),
                 pos: image_spawn_pos(self.camera_pos, ptr_pos, viewport, image.size),
+                size: egui::vec2(image.size[0] as f32, image.size[1] as f32),
             }
             .into(),
         }
@@ -562,6 +563,7 @@ mod tests {
                     &[255, 0, 0, 255],
                 )),
                 pos: Pos2::new(50.0, 60.0),
+                size: egui::vec2(1.0, 1.0),
             }
             .into(),
         }
@@ -647,6 +649,7 @@ mod tests {
                     &[0, 255, 0, 255],
                 )),
                 pos: Pos2::new(3.0, 4.0),
+                size: egui::vec2(1.0, 1.0),
             }
             .into(),
         );
@@ -659,7 +662,7 @@ mod tests {
             matches!(loaded.nodes().get(&text_id), Some(NodeData::Text(text)) if text.content == "saved" && text.width == 123 && text.pos == Pos2::new(1.0, 2.0))
         );
         assert!(
-            matches!(loaded.nodes().get(&image_id), Some(NodeData::Image(image)) if image.pos == Pos2::new(3.0, 4.0))
+            matches!(loaded.nodes().get(&image_id), Some(NodeData::Image(image)) if image.pos == Pos2::new(3.0, 4.0) && image.size == egui::vec2(1.0, 1.0))
         );
 
         _ = fs::remove_file(path);
