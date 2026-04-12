@@ -32,6 +32,9 @@ struct Shortcuts {
 }
 
 const KEYBOARD_CAMERA_SPEED: f32 = 1200.0;
+const MIN_ZOOM: f32 = 0.25;
+const MAX_ZOOM: f32 = 4.0;
+const KEY_ZOOM_FACTOR: f32 = 1.1;
 
 pub fn run(file_path: PathBuf) {
     let persisted_data = load_persistent_data(&file_path);
@@ -46,6 +49,7 @@ pub fn run(file_path: PathBuf) {
 
 pub(crate) struct App {
     pub(crate) camera_pos: Pos2,
+    pub(crate) zoom: f32,
     pub(crate) file_path: PathBuf,
     pub(crate) nodes: HashMap<NodeId, Node>,
     pub(crate) selected: Option<NodeId>,
@@ -129,6 +133,7 @@ impl App {
         let nodes = create_runtime_nodes(&cc.egui_ctx, &data);
         let app = Self {
             camera_pos: Pos2 { x: 0., y: 0. },
+            zoom: 1.0,
             nodes,
             selected: None,
             undo_stack: vec![],
@@ -203,6 +208,34 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
             "Canva Note - {file_name}{dirty}"
         )));
+    }
+
+    pub(crate) fn world_to_screen_pos(&self, world: Pos2) -> Pos2 {
+        ((world - self.camera_pos) * self.zoom).to_pos2()
+    }
+
+    pub(crate) fn screen_to_world_pos(&self, screen: Pos2) -> Pos2 {
+        self.camera_pos + screen.to_vec2() / self.zoom
+    }
+
+    pub(crate) fn screen_to_world_delta(&self, screen_delta: egui::Vec2) -> egui::Vec2 {
+        screen_delta / self.zoom
+    }
+
+    pub(crate) fn viewport_world_size(&self, viewport_screen_size: egui::Vec2) -> egui::Vec2 {
+        viewport_screen_size / self.zoom
+    }
+
+    fn zoom_around(&mut self, factor: f32, ptr_pos_screen: Pos2) {
+        let old_zoom = self.zoom;
+        let new_zoom = (old_zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        if (new_zoom - old_zoom).abs() <= f32::EPSILON {
+            return;
+        }
+
+        let ptr_pos_world = self.screen_to_world_pos(ptr_pos_screen);
+        self.zoom = new_zoom;
+        self.camera_pos = ptr_pos_world - ptr_pos_screen.to_vec2() / self.zoom;
     }
 
     fn delete_selected_command(&self) -> Option<Command> {
@@ -287,28 +320,14 @@ fn create_runtime_nodes(ctx: &egui::Context, data: &PersistentData) -> HashMap<N
         .collect()
 }
 
-fn shortcuts_for(keys: &[Key], modifiers: egui::Modifiers) -> Shortcuts {
-    let pressed = |key| keys.contains(&key);
-    Shortcuts {
-        paste: pressed(Key::I) && modifiers.ctrl,
-        save: pressed(Key::S) && modifiers.command,
-        delete: pressed(Key::D) || pressed(Key::X) || pressed(Key::Delete),
-        undo: (pressed(Key::U) && !modifiers.command && !modifiers.shift)
-            || (pressed(Key::Z) && modifiers.command),
-        redo: (pressed(Key::U) && modifiers.shift)
-            || (pressed(Key::Y) && modifiers.command)
-            || (pressed(Key::R) && modifiers.command),
-    }
-}
-
 fn image_spawn_pos(
     camera_pos: Pos2,
     ptr_pos: Option<Pos2>,
-    viewport: egui::Vec2,
+    viewport_world: egui::Vec2,
     image_size: [usize; 2],
 ) -> Pos2 {
     ptr_pos.unwrap_or_else(|| {
-        camera_pos + (viewport - egui::vec2(image_size[0] as f32, image_size[1] as f32)) * 0.5
+        camera_pos + (viewport_world - egui::vec2(image_size[0] as f32, image_size[1] as f32)) * 0.5
     })
 }
 
@@ -349,25 +368,53 @@ impl eframe::App for App {
             }
         }
 
-        let camera_delta = ctx.input(|i| {
+        let (camera_delta, zoom_factor_from_scroll, zoom_focus, zoom_key_factor) = ctx.input(|i| {
             let mut delta = keyboard_camera_delta(i);
-            delta.y -= i.smooth_scroll_delta.y;
-            delta
+            let zoom_factor_from_scroll = if i.modifiers.ctrl {
+                i.zoom_delta()
+            } else {
+                1.0
+            };
+            let zoom_key_factor = match (i.key_pressed(Key::Plus), i.key_pressed(Key::Minus)) {
+                (true, false) => KEY_ZOOM_FACTOR,
+                (false, true) => 1.0 / KEY_ZOOM_FACTOR,
+                _ => 1.0,
+            };
+            if !i.modifiers.ctrl {
+                delta.y -= i.smooth_scroll_delta.y;
+            }
+
+            (
+                delta,
+                zoom_factor_from_scroll,
+                i.pointer.interact_pos(),
+                zoom_key_factor,
+            )
         });
-        self.camera_pos += camera_delta;
+        self.camera_pos += self.screen_to_world_delta(camera_delta);
+        if zoom_factor_from_scroll != 1.0 {
+            let focus = zoom_focus.unwrap_or_else(|| ctx.content_rect().center());
+            self.zoom_around(zoom_factor_from_scroll, focus);
+        }
+        if zoom_key_factor != 1.0 {
+            self.zoom_around(zoom_key_factor, ctx.content_rect().center());
+        }
 
         let shortcuts = ctx.input(|i| {
-            let keys = i
-                .events
-                .iter()
-                .filter_map(|event| match event {
-                    egui::Event::Key {
-                        key, pressed: true, ..
-                    } => Some(*key),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            shortcuts_for(&keys, i.modifiers)
+            let modifiers = i.modifiers;
+            let u_pressed = i.key_pressed(Key::U);
+            Shortcuts {
+                paste: i.key_pressed(Key::I) && modifiers.ctrl,
+                save: i.key_pressed(Key::S) && modifiers.command,
+                delete: i.key_pressed(Key::D)
+                    || i.key_pressed(Key::X)
+                    || i.key_pressed(Key::Delete),
+                undo: (u_pressed && !modifiers.command && !modifiers.shift)
+                    || (i.key_pressed(Key::Z) && modifiers.command),
+                redo: (u_pressed && modifiers.shift)
+                    || (i.key_pressed(Key::Y) && modifiers.command)
+                    || (i.key_pressed(Key::R) && modifiers.command),
+            }
         });
 
         if shortcuts.save {
@@ -408,7 +455,7 @@ impl eframe::App for App {
                         image.bytes.as_ref(),
                     ),
                     ptr_pos,
-                    ctx.content_rect().size(),
+                    self.viewport_world_size(ctx.content_rect().size()),
                 );
                 self.execute_command_with_ctx(ctx, command);
             } else if let Ok(text) = clipboard.get_text() {
@@ -443,6 +490,7 @@ mod tests {
         let (editor_tx, editor_rx) = std::sync::mpsc::channel();
         let app = App {
             camera_pos: Pos2::ZERO,
+            zoom: 1.0,
             file_path: PathBuf::from("test.canva"),
             nodes: HashMap::new(),
             selected: None,
@@ -638,37 +686,6 @@ mod tests {
     }
 
     #[test]
-    fn shortcut_mapping_covers_save_delete_undo_redo_and_custom_paste() {
-        let command_mods = egui::Modifiers {
-            command: true,
-            ..Default::default()
-        };
-        let ctrl_mods = egui::Modifiers {
-            ctrl: true,
-            ..Default::default()
-        };
-        let shift_mods = egui::Modifiers {
-            shift: true,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            shortcuts_for(&[Key::S], command_mods),
-            Shortcuts {
-                paste: false,
-                save: true,
-                delete: false,
-                undo: false,
-                redo: false,
-            }
-        );
-        assert!(shortcuts_for(&[Key::Delete], egui::Modifiers::default()).delete);
-        assert!(shortcuts_for(&[Key::Z], command_mods).undo);
-        assert!(shortcuts_for(&[Key::U], shift_mods).redo);
-        assert!(shortcuts_for(&[Key::I], ctrl_mods).paste);
-    }
-
-    #[test]
     fn hjkl_camera_keys_map_to_expected_movement() {
         let mut input = egui::RawInput {
             time: Some(1.0),
@@ -700,6 +717,36 @@ mod tests {
             delta,
             egui::vec2(KEYBOARD_CAMERA_SPEED * 0.5, -KEYBOARD_CAMERA_SPEED * 0.5)
         );
+    }
+
+    #[test]
+    fn world_screen_transforms_roundtrip() {
+        let (mut app, _) = test_app();
+        app.camera_pos = Pos2::new(100.0, 50.0);
+        app.zoom = 2.0;
+
+        let world = Pos2::new(130.0, 90.0);
+        let screen = app.world_to_screen_pos(world);
+        assert_eq!(screen, Pos2::new(60.0, 80.0));
+        assert_eq!(app.screen_to_world_pos(screen), world);
+        assert_eq!(
+            app.screen_to_world_delta(egui::vec2(20.0, 10.0)),
+            egui::vec2(10.0, 5.0)
+        );
+    }
+
+    #[test]
+    fn zoom_around_pointer_keeps_focus_world_position_stable() {
+        let (mut app, _) = test_app();
+        app.camera_pos = Pos2::new(100.0, 50.0);
+        app.zoom = 1.0;
+        let focus = Pos2::new(200.0, 150.0);
+        let before = app.screen_to_world_pos(focus);
+
+        app.zoom_around(2.0, focus);
+
+        assert_eq!(app.zoom, 2.0);
+        assert_eq!(app.screen_to_world_pos(focus), before);
     }
 
     #[test]

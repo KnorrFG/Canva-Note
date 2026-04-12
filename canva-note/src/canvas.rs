@@ -85,7 +85,7 @@ impl App {
             });
 
             if secondary_down && ctrl_down {
-                self.camera_pos -= ptr_delta;
+                self.camera_pos -= self.screen_to_world_delta(ptr_delta);
                 global_drag_active = true;
             }
 
@@ -93,7 +93,7 @@ impl App {
             if resp.double_clicked()
                 && let Some(pos) = ptr_pos
             {
-                self.create_new_node_and_open_editor(pos + self.camera_pos.to_vec2());
+                self.create_new_node_and_open_editor(self.screen_to_world_pos(pos));
             }
             if resp.clicked_by(PointerButton::Primary) {
                 self.selected = None;
@@ -104,22 +104,25 @@ impl App {
                 && resp.dragged_by(PointerButton::Secondary)
             {
                 ui.ctx().input(|i| {
-                    self.camera_pos -= i.pointer.delta();
+                    self.camera_pos -= self.screen_to_world_delta(i.pointer.delta());
                 });
             }
 
             let mut node_ids = self.nodes.keys().copied().collect::<Vec<_>>();
             node_ids.sort_unstable();
             let mut node_rects = Vec::with_capacity(node_ids.len());
+            let ptr_delta_world = self.screen_to_world_delta(ptr_delta);
             for node_id in node_ids {
                 let node_pos = self.document.node(node_id).unwrap().pos();
+                let screen_pos = self.world_to_screen_pos(node_pos);
                 let egui_id = self.nodes[&node_id].egui_id;
+                let zoom = self.zoom;
 
                 let resp = match &mut self.nodes.get_mut(&node_id).unwrap().kind {
                     NodeKind::Markdown(md_node) => {
                         let text = self.document.node(node_id).unwrap().as_text().unwrap();
                         let area = Area::new(egui_id)
-                            .fixed_pos(node_pos - self.camera_pos.to_vec2())
+                            .fixed_pos(screen_pos)
                             .sense(Sense::click_and_drag())
                             .constrain(false);
 
@@ -128,15 +131,20 @@ impl App {
                         }
                         area.show(ui.ctx(), |ui| {
                             Frame::NONE.inner_margin(Margin::same(4)).show(ui, |ui| {
+                                let mut style = (**ui.style()).clone();
+                                for font_id in style.text_styles.values_mut() {
+                                    font_id.size *= zoom;
+                                }
+                                ui.set_style(style);
                                 CommonMarkViewer::new()
-                                    .default_width(Some(text.width))
+                                    .default_width(Some((text.width as f32 * zoom) as usize))
                                     .show(ui, &mut md_node.cache, &text.content);
                             });
                         })
                     }
                     NodeKind::Image(image_node) => {
                         let area = Area::new(egui_id)
-                            .fixed_pos(node_pos - self.camera_pos.to_vec2())
+                            .fixed_pos(screen_pos)
                             .sense(Sense::click_and_drag())
                             .constrain(false);
 
@@ -146,7 +154,7 @@ impl App {
                                     Image::new(ImageSource::Texture(SizedTexture::from_handle(
                                         &image_node.texture,
                                     )))
-                                    .fit_to_original_size(1.0),
+                                    .fit_to_original_size(zoom),
                                 );
                             });
                         })
@@ -169,7 +177,7 @@ impl App {
                 node_rects.push((node_id, resp.response.rect));
 
                 if dragged_node(&self.active_drag, global_drag_active) == Some(node_id) {
-                    *self.document.node_mut(node_id).unwrap().pos_mut() += ptr_delta;
+                    *self.document.node_mut(node_id).unwrap().pos_mut() += ptr_delta_world;
                 }
             }
 
