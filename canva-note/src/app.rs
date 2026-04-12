@@ -31,6 +31,8 @@ struct Shortcuts {
     redo: bool,
 }
 
+const KEYBOARD_CAMERA_SPEED: f32 = 1200.0;
+
 pub fn run(file_path: PathBuf) {
     let persisted_data = load_persistent_data(&file_path);
     let native_options = eframe::NativeOptions::default();
@@ -310,6 +312,26 @@ fn image_spawn_pos(
     })
 }
 
+fn keyboard_camera_delta(input: &egui::InputState) -> egui::Vec2 {
+    let mut delta = egui::Vec2::ZERO;
+    let step = KEYBOARD_CAMERA_SPEED * input.stable_dt;
+
+    if input.key_down(Key::H) {
+        delta.x += step;
+    }
+    if input.key_down(Key::L) {
+        delta.x -= step;
+    }
+    if input.key_down(Key::K) {
+        delta.y += step;
+    }
+    if input.key_down(Key::J) {
+        delta.y -= step;
+    }
+
+    delta
+}
+
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         while let Ok(msg) = self.editor_rx.try_recv() {
@@ -326,6 +348,13 @@ impl eframe::App for App {
                 );
             }
         }
+
+        let camera_delta = ctx.input(|i| {
+            let mut delta = keyboard_camera_delta(i);
+            delta.y -= i.smooth_scroll_delta.y;
+            delta
+        });
+        self.camera_pos += camera_delta;
 
         let shortcuts = ctx.input(|i| {
             let keys = i
@@ -637,6 +666,40 @@ mod tests {
         assert!(shortcuts_for(&[Key::Z], command_mods).undo);
         assert!(shortcuts_for(&[Key::U], shift_mods).redo);
         assert!(shortcuts_for(&[Key::I], ctrl_mods).paste);
+    }
+
+    #[test]
+    fn hjkl_camera_keys_map_to_expected_movement() {
+        let mut input = egui::RawInput {
+            time: Some(1.0),
+            predicted_dt: 0.5,
+            ..Default::default()
+        };
+        input.events = vec![
+            egui::Event::Key {
+                key: Key::H,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            },
+            egui::Event::Key {
+                key: Key::J,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            },
+        ];
+        let ctx = egui::Context::default();
+        ctx.begin_pass(input);
+        let delta = ctx.input(keyboard_camera_delta);
+        let _ = ctx.end_pass();
+
+        assert_eq!(
+            delta,
+            egui::vec2(KEYBOARD_CAMERA_SPEED * 0.5, -KEYBOARD_CAMERA_SPEED * 0.5)
+        );
     }
 
     #[test]
