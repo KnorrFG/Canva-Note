@@ -273,6 +273,34 @@ impl MyEguiApp {
             })
     }
 
+    fn node_pos(&self, node_id: NodeId) -> Pos2 {
+        if let Some(text) = self.document.data().texts.get(&node_id) {
+            text.pos
+        } else {
+            self.document.data().images[&node_id].pos
+        }
+    }
+
+    fn node_pos_mut(&mut self, node_id: NodeId) -> &mut Pos2 {
+        if self.document.data().texts.contains_key(&node_id) {
+            &mut self
+                .document
+                .data_mut()
+                .texts
+                .get_mut(&node_id)
+                .unwrap()
+                .pos
+        } else {
+            &mut self
+                .document
+                .data_mut()
+                .images
+                .get_mut(&node_id)
+                .unwrap()
+                .pos
+        }
+    }
+
     fn update_window_title(&self, ctx: &egui::Context) {
         let file_name = self
             .file_path
@@ -522,16 +550,23 @@ impl eframe::App for MyEguiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             let mut global_drag_active = false;
-            let (secondary_down, ctrl_down, ptr_delta, ptr_pos, primary_double_click_occured) = ui
-                .input(|i| {
-                    (
-                        i.pointer.button_down(PointerButton::Secondary),
-                        i.modifiers.ctrl,
-                        i.pointer.delta(),
-                        i.pointer.interact_pos(),
-                        i.pointer.button_double_clicked(PointerButton::Primary),
-                    )
-                });
+            let (
+                secondary_down,
+                secondary_pressed,
+                ctrl_down,
+                ptr_delta,
+                ptr_pos,
+                primary_double_click_occured,
+            ) = ui.input(|i| {
+                (
+                    i.pointer.button_down(PointerButton::Secondary),
+                    i.pointer.button_pressed(PointerButton::Secondary),
+                    i.modifiers.ctrl,
+                    i.pointer.delta(),
+                    i.pointer.interact_pos(),
+                    i.pointer.button_double_clicked(PointerButton::Primary),
+                )
+            });
 
             if secondary_down && ctrl_down {
                 self.camera_pos -= ptr_delta;
@@ -548,18 +583,28 @@ impl eframe::App for MyEguiApp {
                 self.selected = None;
             }
 
-            if !global_drag_active && resp.dragged_by(PointerButton::Secondary) {
+            // camera drag. if not already dragged globally, or another drag is active
+            if !global_drag_active
+                && self.active_drag.is_none()
+                && resp.dragged_by(PointerButton::Secondary)
+            {
                 ui.ctx().input(|i| {
                     self.camera_pos -= i.pointer.delta();
                 });
             }
 
-            for (&node_id, node) in &mut self.nodes {
-                let resp = match &mut node.kind {
+            let node_ids = self.nodes.keys().copied().collect::<Vec<_>>();
+            for node_id in node_ids {
+                let node_pos = self.node_pos(node_id);
+                let egui_id = self.nodes[&node_id].egui_id;
+                let text = self.document.data().texts.get(&node_id);
+                let is_markdown = text.is_some();
+
+                let resp = match &mut self.nodes.get_mut(&node_id).unwrap().kind {
                     NodeKind::Markdown(md_node) => {
-                        let text = &self.document.data().texts[&node_id];
-                        let area = Area::new(node.egui_id)
-                            .fixed_pos(text.pos - self.camera_pos.to_vec2())
+                        let text = text.unwrap();
+                        let area = Area::new(egui_id)
+                            .fixed_pos(node_pos - self.camera_pos.to_vec2())
                             .sense(Sense::click_and_drag())
                             .constrain(false);
 
@@ -575,15 +620,11 @@ impl eframe::App for MyEguiApp {
                         })
                     }
                     NodeKind::Image(image_node) => {
-                        let image = &self.document.data().images[&node_id];
-                        let area = Area::new(node.egui_id)
-                            .fixed_pos(image.pos - self.camera_pos.to_vec2())
+                        let area = Area::new(egui_id)
+                            .fixed_pos(node_pos - self.camera_pos.to_vec2())
                             .sense(Sense::click_and_drag())
                             .constrain(false);
 
-                        if secondary_down {
-                            ui.style_mut().interaction.selectable_labels = false;
-                        }
                         area.show(ui.ctx(), |ui| {
                             Frame::NONE.inner_margin(Margin::same(4)).show(ui, |ui| {
                                 ui.add(
@@ -610,85 +651,45 @@ impl eframe::App for MyEguiApp {
                     );
                 }
 
-                if let Some(ptr_pos) = ptr_pos
-                    && !global_drag_active
-                    && secondary_down
-                    && resp.response.rect.contains(ptr_pos)
-                {
-                    if self.active_drag.is_none()
-                        && let Some(start_pos) = self
-                            .document
-                            .data()
-                            .texts
-                            .get(&node_id)
-                            .map(|text| text.pos)
-                            .or_else(|| {
-                                self.document
-                                    .data()
-                                    .images
-                                    .get(&node_id)
-                                    .map(|image| image.pos)
-                            })
+                if let Some(ptr_pos) = ptr_pos {
+                    if secondary_pressed
+                        && !global_drag_active
+                        && resp.response.rect.contains(ptr_pos)
                     {
-                        self.active_drag = Some(DragState { node_id, start_pos });
+                        self.active_drag = Some(DragState {
+                            node_id,
+                            start_pos: self.node_pos(node_id),
+                        });
                     }
-                    match &node.kind {
-                        NodeKind::Markdown(_) => {
-                            self.document
-                                .data_mut()
-                                .texts
-                                .get_mut(&node_id)
-                                .unwrap()
-                                .pos += ptr_delta;
-                        }
-                        NodeKind::Image(_) => {
-                            self.document
-                                .data_mut()
-                                .images
-                                .get_mut(&node_id)
-                                .unwrap()
-                                .pos += ptr_delta;
-                        }
-                    }
-                }
 
-                if let Some(ptr_pos) = ptr_pos
-                    && !global_drag_active
-                    && primary_double_click_occured
-                    && resp.response.rect.contains(ptr_pos)
-                    && let NodeKind::Markdown(_) = &node.kind
-                {
-                    spawn_editor(
-                        node_id,
-                        &self.document.data().texts[&node_id].content,
-                        self.editor_tx.clone(),
-                        Arc::clone(&self.shutdown),
-                    );
+                    if self.active_drag.as_ref().map(|drag| drag.node_id) == Some(node_id) {
+                        *self.node_pos_mut(node_id) += ptr_delta;
+                    }
+
+                    if !global_drag_active
+                        && primary_double_click_occured
+                        && resp.response.rect.contains(ptr_pos)
+                        && is_markdown
+                    {
+                        spawn_editor(
+                            node_id,
+                            &self.document.data().texts[&node_id].content,
+                            self.editor_tx.clone(),
+                            Arc::clone(&self.shutdown),
+                        );
+                    }
                 }
             }
 
-            if !secondary_down
-                && let Some(drag) = self.active_drag.take()
-                && let Some(end_pos) = self
-                    .document
-                    .data()
-                    .texts
-                    .get(&drag.node_id)
-                    .map(|text| text.pos)
-                    .or_else(|| {
-                        self.document
-                            .data()
-                            .images
-                            .get(&drag.node_id)
-                            .map(|image| image.pos)
-                    })
-                && end_pos != drag.start_pos
-            {
-                self.record_applied_command(Command::MoveNode(MoveNodeCommand {
-                    id: drag.node_id,
-                    from: drag.start_pos,
-                    to: end_pos,
-                }));
+            if !secondary_down && let Some(drag) = self.active_drag.take() {
+                let end_pos = self.node_pos(drag.node_id);
+                if end_pos != drag.start_pos {
+                    self.record_applied_command(Command::MoveNode(MoveNodeCommand {
+                        id: drag.node_id,
+                        from: drag.start_pos,
+                        to: end_pos,
+                    }));
+                }
             }
         });
     }
