@@ -131,3 +131,42 @@ impl Document {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn document_tracks_dirty_state_and_text_access() {
+        let mut document = Document::new(PersistentData::default());
+        assert!(!document.is_dirty());
+
+        let node_id = document.alloc_node_id();
+        assert!(document.is_dirty());
+
+        document.mark_clean();
+        assert!(!document.is_dirty());
+
+        document.insert_node(
+            node_id,
+            TextData {
+                content: "hello".into(),
+                width: 650,
+                pos: Pos2::new(10.0, 20.0),
+            }
+            .into(),
+        );
+        assert!(document.is_dirty());
+        assert_eq!(document.text(TextNodeId(node_id)).content, "hello");
+        assert_eq!(document.node(node_id).unwrap().pos(), Pos2::new(10.0, 20.0));
+
+        document.mark_clean();
+        document.text_mut(TextNodeId(node_id)).content = "updated".into();
+        assert!(document.is_dirty());
+        assert_eq!(document.text(TextNodeId(node_id)).content, "updated");
+
+        let removed = document.remove_node(node_id);
+        assert!(matches!(removed, Some(NodeData::Text(_))));
+        assert!(document.node(node_id).is_none());
+    }
+}
