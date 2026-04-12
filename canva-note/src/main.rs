@@ -11,7 +11,12 @@ use std::{
     time::Duration,
 };
 
+mod commands;
+
 use clap::Parser;
+use commands::{
+    Command, CreateNodeCommand, DeleteNodeCommand, MoveNodeCommand, SetTextContentCommand,
+};
 use derive_more::{From, TryInto};
 use eframe::egui::{
     self, Area, Color32, ColorImage, CornerRadius, FontData, FontDefinitions, FontFamily, Id,
@@ -45,6 +50,9 @@ struct MyEguiApp {
     file_path: PathBuf,
     nodes: HashMap<NodeId, Node>,
     selected: Option<NodeId>,
+    undo_stack: Vec<Command>,
+    redo_stack: Vec<Command>,
+    active_drag: Option<DragState>,
     document: Document,
     editor_rx: std::sync::mpsc::Receiver<EditorThreadMessage>,
     editor_tx: Sender<EditorThreadMessage>,
@@ -79,17 +87,28 @@ struct PersistentData {
     images: HashMap<NodeId, ImageData>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct TextData {
     content: String,
     width: usize,
     pos: Pos2,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct ImageData {
-    data: egui::ColorImage,
+    data: Arc<egui::ColorImage>,
     pos: Pos2,
+}
+
+#[derive(Clone)]
+enum PersistentNodeData {
+    Text(TextData),
+    Image(ImageData),
+}
+
+struct DragState {
+    node_id: NodeId,
+    start_pos: Pos2,
 }
 
 struct Document {
@@ -120,7 +139,7 @@ impl Document {
     }
 }
 
-fn egui_node_id(node_id: NodeId) -> Id {
+pub(crate) fn egui_node_id(node_id: NodeId) -> Id {
     Id::new(("node", node_id))
 }
 
@@ -169,6 +188,9 @@ impl MyEguiApp {
             camera_pos: Pos2 { x: 0., y: 0. },
             nodes,
             selected: None,
+            undo_stack: vec![],
+            redo_stack: vec![],
+            active_drag: None,
             document: Document::new(data),
             file_path,
             editor_tx,
@@ -186,32 +208,19 @@ impl MyEguiApp {
         node_id
     }
 
-    fn create_text_node(&mut self, pos: Pos2, content: String) -> NodeId {
-        let node_id = self.alloc_node_id();
-        let data = self.document.data_mut();
-        data.texts.insert(
-            node_id,
-            TextData {
-                content,
-                width: 650,
-                pos,
-            },
-        );
-        self.nodes.insert(
-            node_id,
-            Node {
-                egui_id: egui_node_id(node_id),
-                kind: MarkdownNode {
-                    cache: CommonMarkCache::default(),
-                }
-                .into(),
-            },
-        );
-        node_id
-    }
-
     fn create_new_node_and_open_editor(&mut self, pos: Pos2) {
-        let node_id = self.create_text_node(pos, String::new());
+        let node_id = self.alloc_node_id();
+        self.execute_command_with_ctx(
+            &egui::Context::default(),
+            Command::CreateNode(CreateNodeCommand {
+                id: node_id,
+                data: PersistentNodeData::Text(TextData {
+                    content: String::new(),
+                    width: 650,
+                    pos,
+                }),
+            }),
+        );
         spawn_editor(
             node_id,
             "",
@@ -220,46 +229,48 @@ impl MyEguiApp {
         );
     }
 
-    fn create_image_node(&mut self, ctx: &egui::Context, pos: Pos2, image: ColorImage) {
-        let node_id = self.alloc_node_id();
-        let texture = ctx.load_texture(
-            format!("pasted-image-{node_id}"),
-            egui::ImageData::Color(Arc::new(image.clone())),
-            TextureOptions::default(),
-        );
-        self.document
-            .data_mut()
-            .images
-            .insert(node_id, ImageData { data: image, pos });
-        self.nodes.insert(
-            node_id,
-            Node {
-                egui_id: egui_node_id(node_id),
-                kind: ImageNode { texture }.into(),
-            },
-        );
+    fn execute_command_with_ctx(&mut self, ctx: &egui::Context, command: Command) {
+        command.apply(self, ctx);
+        self.undo_stack.push(command);
+        self.redo_stack.clear();
     }
 
-    fn delete_selected(&mut self) {
-        let Some(selected) = self.selected else {
+    fn record_applied_command(&mut self, command: Command) {
+        self.undo_stack.push(command);
+        self.redo_stack.clear();
+    }
+
+    fn undo(&mut self, ctx: &egui::Context) {
+        let Some(command) = self.undo_stack.pop() else {
             return;
         };
-        let Some(node) = self.nodes.remove(&selected) else {
-            self.selected = None;
-            log::error!("Selection was on node: {selected}, but no node existed");
+        command.inverse().apply(self, ctx);
+        self.redo_stack.push(command);
+    }
+
+    fn redo(&mut self, ctx: &egui::Context) {
+        let Some(command) = self.redo_stack.pop() else {
             return;
         };
+        command.apply(self, ctx);
+        self.undo_stack.push(command);
+    }
 
-        match node.kind {
-            NodeKind::Markdown(_) => {
-                self.document.data_mut().texts.remove(&selected);
-            }
-            NodeKind::Image(_) => {
-                self.document.data_mut().images.remove(&selected);
-            }
-        }
-
-        self.selected = None;
+    fn node_snapshot(&self, node_id: NodeId) -> Option<PersistentNodeData> {
+        self.document
+            .data()
+            .texts
+            .get(&node_id)
+            .cloned()
+            .map(PersistentNodeData::Text)
+            .or_else(|| {
+                self.document
+                    .data()
+                    .images
+                    .get(&node_id)
+                    .cloned()
+                    .map(PersistentNodeData::Image)
+            })
     }
 
     fn update_window_title(&self, ctx: &egui::Context) {
@@ -311,7 +322,7 @@ fn create_runtime_nodes(ctx: &egui::Context, data: &PersistentData) -> HashMap<N
                 kind: ImageNode {
                     texture: ctx.load_texture(
                         format!("loaded-image-{node_id}"),
-                        egui::ImageData::Color(Arc::new(image.data.clone())),
+                        egui::ImageData::Color(image.data.clone()),
                         TextureOptions::default(),
                     ),
                 }
@@ -397,18 +408,40 @@ struct EditorThreadMessage {
 impl eframe::App for MyEguiApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         while let Ok(msg) = self.editor_rx.try_recv() {
-            if let Some(text) = self.document.data_mut().texts.get_mut(&msg.node_id) {
-                text.content = msg.content;
+            if let Some(text) = self.document.data().texts.get(&msg.node_id) {
+                let old = text.content.clone();
+                if old != msg.content {
+                    self.execute_command_with_ctx(
+                        ctx,
+                        Command::SetTextContent(SetTextContentCommand {
+                            id: msg.node_id,
+                            old,
+                            new: msg.content,
+                        }),
+                    );
+                }
             }
         }
 
-        let (_copy_pressed, paste_pressed, save_pressed, delete_pressed) = ctx.input(|i| {
+        let (
+            _copy_pressed,
+            paste_pressed,
+            save_pressed,
+            delete_pressed,
+            undo_pressed,
+            redo_pressed,
+        ) = ctx.input(|i| {
             let copy = i.key_pressed(Key::C) && i.modifiers.command;
             let paste = i.key_pressed(Key::I) && i.modifiers.ctrl;
             let save = i.key_pressed(Key::S) && i.modifiers.command;
             let delete =
                 i.key_pressed(Key::D) || i.key_pressed(Key::X) || i.key_pressed(Key::Delete);
-            (copy, paste, save, delete)
+            let undo = (i.key_pressed(Key::U) && !i.modifiers.command && !i.modifiers.shift)
+                || (i.key_pressed(Key::Z) && i.modifiers.command);
+            let redo = (i.key_pressed(Key::U) && i.modifiers.shift)
+                || (i.key_pressed(Key::Y) && i.modifiers.command)
+                || (i.key_pressed(Key::R) && i.modifiers.command);
+            (copy, paste, save, delete, undo, redo)
         });
 
         if save_pressed {
@@ -417,7 +450,22 @@ impl eframe::App for MyEguiApp {
         }
 
         if delete_pressed {
-            self.delete_selected();
+            if let Some(selected) = self.selected
+                && let Some(data) = self.node_snapshot(selected)
+            {
+                self.execute_command_with_ctx(
+                    ctx,
+                    Command::DeleteNode(DeleteNodeCommand { id: selected, data }),
+                );
+            }
+        }
+
+        if undo_pressed {
+            self.undo(ctx);
+        }
+
+        if redo_pressed {
+            self.redo(ctx);
         }
 
         if paste_pressed {
@@ -438,16 +486,33 @@ impl eframe::App for MyEguiApp {
                     let image_size = egui::vec2(image.width as f32, image.height as f32);
                     self.camera_pos + (viewport - image_size) * 0.5
                 });
-                self.create_image_node(
+                let node_id = self.alloc_node_id();
+                self.execute_command_with_ctx(
                     ctx,
-                    pos,
-                    ColorImage::from_rgba_unmultiplied(
-                        [image.width, image.height],
-                        image.bytes.as_ref(),
-                    ),
+                    Command::CreateNode(CreateNodeCommand {
+                        id: node_id,
+                        data: PersistentNodeData::Image(ImageData {
+                            data: Arc::new(ColorImage::from_rgba_unmultiplied(
+                                [image.width, image.height],
+                                image.bytes.as_ref(),
+                            )),
+                            pos,
+                        }),
+                    }),
                 );
             } else if let Ok(text) = clipboard.get_text() {
-                self.create_text_node(ptr_pos.unwrap_or(self.camera_pos), text);
+                let node_id = self.alloc_node_id();
+                self.execute_command_with_ctx(
+                    ctx,
+                    Command::CreateNode(CreateNodeCommand {
+                        id: node_id,
+                        data: PersistentNodeData::Text(TextData {
+                            content: text,
+                            width: 650,
+                            pos: ptr_pos.unwrap_or(self.camera_pos),
+                        }),
+                    }),
+                );
             }
         }
 
@@ -477,7 +542,7 @@ impl eframe::App for MyEguiApp {
             if resp.double_clicked()
                 && let Some(pos) = ptr_pos
             {
-                self.create_new_node_and_open_editor(pos);
+                self.create_new_node_and_open_editor(pos + self.camera_pos.to_vec2());
             }
             if resp.clicked_by(PointerButton::Primary) {
                 self.selected = None;
@@ -546,6 +611,23 @@ impl eframe::App for MyEguiApp {
                     && secondary_down
                     && resp.response.rect.contains(ptr_pos)
                 {
+                    if self.active_drag.is_none()
+                        && let Some(start_pos) = self
+                            .document
+                            .data()
+                            .texts
+                            .get(&node_id)
+                            .map(|text| text.pos)
+                            .or_else(|| {
+                                self.document
+                                    .data()
+                                    .images
+                                    .get(&node_id)
+                                    .map(|image| image.pos)
+                            })
+                    {
+                        self.active_drag = Some(DragState { node_id, start_pos });
+                    }
                     match &node.kind {
                         NodeKind::Markdown(_) => {
                             self.document
@@ -579,6 +661,30 @@ impl eframe::App for MyEguiApp {
                         Arc::clone(&self.shutdown),
                     );
                 }
+            }
+
+            if !secondary_down
+                && let Some(drag) = self.active_drag.take()
+                && let Some(end_pos) = self
+                    .document
+                    .data()
+                    .texts
+                    .get(&drag.node_id)
+                    .map(|text| text.pos)
+                    .or_else(|| {
+                        self.document
+                            .data()
+                            .images
+                            .get(&drag.node_id)
+                            .map(|image| image.pos)
+                    })
+                && end_pos != drag.start_pos
+            {
+                self.record_applied_command(Command::MoveNode(MoveNodeCommand {
+                    id: drag.node_id,
+                    from: drag.start_pos,
+                    to: end_pos,
+                }));
             }
         });
     }
