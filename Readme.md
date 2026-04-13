@@ -36,6 +36,12 @@ feature complete yet.
 - camera location hotkeys
 - actual config
 
+## AI Disclaimer
+
+Yes, I'm using AI. But I review and fix a lot of produced code (except for the
+unit tests, tbh). I reject the term vibe-coded slop for my projects. This code
+may not look exactly as if I had written it by hand, but it's close, and it's
+also not worse.
 
 
 
