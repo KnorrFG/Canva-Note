@@ -43,5 +43,11 @@ unit tests, tbh). I reject the term vibe-coded slop for my projects. This code
 may not look exactly as if I had written it by hand, but it's close, and it's
 also not worse.
 
+## Bundled Font
+
+This repository bundles `SourceSans3-Regular.ttf` from Adobe Source Sans 3.
+The font is licensed under the SIL Open Font License 1.1.
+
+See [LICENSES/SourceSans3-OFL-1.1.txt](LICENSES/SourceSans3-OFL-1.1.txt).
 
 
