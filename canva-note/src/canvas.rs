@@ -32,11 +32,6 @@ impl SelectedNodeSizing {
     }
 }
 
-struct NodeContainerResponse {
-    response: egui::Response,
-    content_rect: Rect,
-}
-
 fn fit_size_with_aspect(source_size: egui::Vec2, available_size: egui::Vec2) -> egui::Vec2 {
     let scale = (available_size.x / source_size.x)
         .min(available_size.y / source_size.y)
@@ -117,7 +112,7 @@ fn show_node_container(
     screen_pos: egui::Pos2,
     sizing: SelectedNodeSizing,
     add_contents: impl FnOnce(&mut egui::Ui) -> Rect,
-) -> NodeContainerResponse {
+) -> egui::Response {
     let mut window = Window::new("")
         .id(egui_id)
         .title_bar(false)
@@ -142,13 +137,7 @@ fn show_node_container(
             .min_height(0.0),
         SelectedNodeSizing::Size(size) => window.default_size(size),
     };
-    let inner = window.show(ctx, add_contents).unwrap();
-    NodeContainerResponse {
-        response: inner.response,
-        content_rect: inner
-            .inner
-            .expect("selected node window should have content"),
-    }
+    window.show(ctx, add_contents).unwrap().response
 }
 
 fn show_unselected_node_container(
@@ -156,16 +145,13 @@ fn show_unselected_node_container(
     egui_id: egui::Id,
     screen_pos: egui::Pos2,
     add_contents: impl FnOnce(&mut egui::Ui) -> Rect,
-) -> NodeContainerResponse {
-    let inner = Area::new(egui_id)
+) -> egui::Response {
+    Area::new(egui_id)
         .fixed_pos(screen_pos)
         .sense(Sense::click_and_drag())
         .constrain(false)
-        .show(ctx, add_contents);
-    NodeContainerResponse {
-        response: inner.response,
-        content_rect: inner.inner,
-    }
+        .show(ctx, add_contents)
+        .response
 }
 
 fn show_selected_markdown(
@@ -175,7 +161,7 @@ fn show_selected_markdown(
     zoom: f32,
     text: &crate::document::TextData,
     cache: &mut egui_commonmark::CommonMarkCache,
-) -> NodeContainerResponse {
+) -> egui::Response {
     show_node_container(
         ctx,
         egui_id,
@@ -200,7 +186,7 @@ fn show_unselected_markdown(
     zoom: f32,
     text: &crate::document::TextData,
     cache: &mut egui_commonmark::CommonMarkCache,
-) -> NodeContainerResponse {
+) -> egui::Response {
     show_unselected_node_container(ctx, egui_id, screen_pos, |ui| {
         Frame::NONE
             .inner_margin(Margin::same(4))
@@ -227,7 +213,7 @@ fn show_selected_image(
     image_size: egui::Vec2,
     source_size: egui::Vec2,
     texture: &eframe::egui::TextureHandle,
-) -> NodeContainerResponse {
+) -> egui::Response {
     show_node_container(
         ctx,
         egui_id,
@@ -257,7 +243,7 @@ fn show_unselected_image(
     zoom: f32,
     image_size: egui::Vec2,
     texture: &eframe::egui::TextureHandle,
-) -> NodeContainerResponse {
+) -> egui::Response {
     show_unselected_node_container(ctx, egui_id, screen_pos, |ui| {
         Frame::NONE
             .inner_margin(Margin::same(4))
@@ -345,17 +331,6 @@ impl App {
                                 &mut md_node.cache,
                             );
 
-                            // the window has extra space, we need to update the stored
-                            // coordinates to include the window values to prevent the window
-                            // from jumping
-                            let new_pos = self.screen_to_world_pos(response.response.rect.min);
-                            let new_width = (response.content_rect.width() / zoom).round() as usize;
-                            if let crate::document::NodeData::Text(text) =
-                                self.document.node_mut(node_id).unwrap()
-                            {
-                                text.pos = new_pos;
-                                text.width = new_width;
-                            }
                             response
                         }
                         NodeKind::Image(image_node) => {
@@ -379,14 +354,6 @@ impl App {
                                 source_size,
                                 &image_node.texture,
                             );
-                            let new_pos = self.screen_to_world_pos(response.response.rect.min);
-                            let new_size = response.content_rect.size() / zoom;
-                            if let crate::document::NodeData::Image(image) =
-                                self.document.node_mut(node_id).unwrap()
-                            {
-                                image.pos = new_pos;
-                                image.size = new_size;
-                            }
                             response
                         }
                     }
@@ -423,11 +390,11 @@ impl App {
                     }
                 };
 
-                if resp.response.clicked_by(PointerButton::Primary) {
+                if resp.clicked_by(PointerButton::Primary) {
                     self.selected = Some(node_id);
                 }
 
-                node_rects.push((node_id, resp.response.rect));
+                node_rects.push((node_id, resp.rect));
 
                 if dragged_node(&self.active_drag, global_drag_active) == Some(node_id) {
                     *self.document.node_mut(node_id).unwrap().pos_mut() += ptr_delta_world;

@@ -405,7 +405,7 @@ impl eframe::App for App {
             let modifiers = i.modifiers;
             let u_pressed = i.key_pressed(Key::U);
             Shortcuts {
-                paste: i.key_pressed(Key::I) && modifiers.ctrl,
+                paste: i.key_pressed(Key::P) && modifiers.ctrl,
                 save: i.key_pressed(Key::S) && modifiers.command,
                 delete: i.key_pressed(Key::D)
                     || i.key_pressed(Key::X)
